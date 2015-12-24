@@ -197,7 +197,7 @@ class RabbitMQAPI(object):
 
 if __name__ == '__main__':
     # set zabix server
-    zabbix = 'zabbix.sankuai.info'
+    zabbix = 'zabbix.test.com'
     sender = ZabbixSender(zabbix)
     # monitor key
     host = sys.argv[1]
