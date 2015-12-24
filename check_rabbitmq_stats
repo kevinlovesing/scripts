@@ -1,0 +1,220 @@
+#!/usr/bin/python
+
+import sys
+import socket
+import re
+from ZabbixSender.ZabbixSender import ZabbixSender
+
+import json
+import socket
+import urllib2
+import requests
+from collections import defaultdict
+
+class RabbitMQAPI(object):
+    '''Class for RabbitMQ Management API'''
+
+    def __init__(self, username='guest', password='guest', hostname='',
+                 port=15672, interval=60):
+        self.username = username
+        self.password = password
+        self.hostname = hostname or socket.gethostname()
+        self.port = port
+        self.stat_interval = interval
+
+    def call_api(self, path):
+        '''Call the REST API and convert the results into JSON.'''
+        url = 'http://{0}:{1}/api/{2}'.format(self.hostname, self.port, path)
+        response = requests.get(url, auth=(self.username, self.password))
+        '''
+        password_mgr = urllib2.HTTPPasswordMgrWithDefaultRealm()
+        password_mgr.add_password(None, url, self.username, self.password)
+        handler = urllib2.HTTPBasicAuthHandler(password_mgr)
+        '''
+        return json.loads(response.content)
+
+    def get_message_details(self):
+        '''get messages overview'''
+        messages = {}
+        cluster = self.call_api('overview')
+	#print cluster
+        messages['cluster.messages_ready'] = cluster.get('queue_totals', {}).get('messages_ready',0)
+        messages['cluster.queue_totals'] = cluster.get('object_totals', {}).get('queues',0)
+        messages['cluster.connection_totals'] = cluster.get('object_totals', {}).get('connections',0)
+        messages['cluster.exchange_totals'] = cluster.get('object_totals', {}).get('exchanges',0)
+        messages['cluster.consumer_totals'] = cluster.get('consumer_totals', {}).get('consumers',0)
+        messages['cluster.messages_unacknowledged'] = cluster.get(
+            'queue_totals', {}).get('messages_unacknowledged', 0)
+        messages['cluster.messages_deliver_get'] = float(format(cluster.get('message_stats', {}).get(
+            'deliver_get_details',{}).get('rate',0),'.2f'))
+        messages['cluster.messages_publish'] = float(format(cluster.get('message_stats', {}).get(
+            'publish_details',{}).get('rate', 0), '.2f'))
+        messages['cluster.messages_redeliver'] = float(format(cluster.get('message_stats', {}).get(
+            'redeliver_details',{}).get('rate', 0), '.2f'))
+        messages['cluster.messages_ack'] = float(format(cluster.get('message_stats',{}).get(
+            'ack_details',{}).get('rate',0), '.2f'))
+        return messages
+
+    def get_nodes_details(self):
+        detail = defaultdict(float)
+        for node in self.call_api('nodes'):
+            name = node['name'].split('@')[1]
+            if name == self.hostname.split('.')[0]:
+                detail['nodes.proc_used'] = node['proc_used']
+                detail['nodes.proc_total'] = node['proc_total']
+                detail['nodes.proc_used_ratio'] =format(
+                    node['proc_used']/float(node['proc_total']) * 100, '.2f')
+                detail['nodes.fd_used'] = node['fd_used']
+                detail['nodes.fd_total'] = node['fd_total']
+                detail['nodes.fd_used_ratio'] = format(
+                    node['fd_used']/float(node['fd_total']) * 100, '.2f')
+                detail['nodes.sockets_used'] = node['sockets_used']
+                detail['nodes.sockets_total'] = node['sockets_total']
+                detail['nodes.sockets_used_ratio'] = format(
+                    node['sockets_used']/float(node['sockets_total']) * 100, '.2f')
+                detail['nodes.mem_used'] = format(
+                    node['mem_used']/1024.0/1024.0,'.2f')
+                detail['nodes.mem_limit'] = format(
+                    node['mem_limit']/1024.0/1024.0,'.2f')
+                detail['nodes.mem_used_ratio'] = format(
+                    node['mem_used']/float(node['mem_limit']) * 100, '.2f')
+                detail['nodes.disk_free'] = format(
+                    node['disk_free']/1024.0/1024.0/1024.0,'.2f')
+                detail['nodes.disk_free_limit'] = format(
+                    node['disk_free_limit']/1024.0/1024.0/1024.0,'.2f')
+                detail['nodes.disk_free_ratio'] = format(
+                    node['disk_free']/float(node['disk_free_limit']), '.2f')
+        return detail
+
+    def get_channels_details(self):
+        channels = defaultdict(float)
+        for channel in self.call_api('channels'):
+            channels['cluster.channels'] += 1
+            name = channel['node'].split('@')[1]
+            if name == self.hostname.split('.')[0]:
+                channels['nodes.channels'] += 1
+                if 'nodes.channels_blocked' not in channels:
+                    channels['nodes.channels_blocked'] = 0
+                if 'client_flow_blocked' in channel and channel['client_flow_blocked']:
+                    channels['nodes.channels_blocked'] += 1
+                else:
+                    channels['nodes.channels_blocked'] += 0
+                channels['nodes.messages_ack'] += float(format(channel.get(
+                    'message_stats',{}).get('ack_details',{}).get('rate',0), '.2f'))
+                channels['nodes.messages_deliver_get'] += float(format(channel.get(
+                    'message_stats',{}).get('deliver_get_details',{}).get('rate',0), '.2f'))
+                channels['nodes.messages_redeliver'] += float(format(channel.get(
+                    'message_stats',{}).get('redeliver_details',{}).get('rate',0), '.2f'))
+                channels['nodes.messages_publish'] += float(format(channel.get(
+                    'message_stats',{}).get('publish_details',{}).get('rate',0), '.2f'))
+        return channels
+
+    def get_queues_info(self):
+        queues = defaultdict(int)
+        for queue in self.call_api('queues'):
+            queues['cluster.queues'] += 1
+	return queues
+	
+    def get_queues_details(self):
+        queues = defaultdict(int)
+        max_queue_message_ready = 0
+        max_queue_message_ready_queue = ''
+        max_queue_message_unack = 0
+        max_queue_message_unack_queue = ''
+        for queue in self.call_api('queues'):
+            queues['cluster.queues'] += 1
+            queues['cluster.consumers'] += queue['consumers']
+            vhost_name = queue['vhost'].replace('.', '-')
+            if vhost_name == '/':
+                vhost_name = 'default'
+            node_name = queue['node'].split('@')[1]
+            queue_name = queue['name'].replace('.', '-')
+            if node_name == self.hostname.split('.')[0]:
+                queues['nodes.consumers'] += queue['consumers']
+                queues['nodes.queues'] += 1
+                queues['nodes.messages_ready'] += \
+                    queue.get('messages_ready', 0)
+                queues['nodes.messages_unacknowledged'] += \
+                    queue.get('messages_unacknowledged',0)
+            queues['queues_' + vhost_name + '_' + queue_name + '.messages_ready'] = \
+                queue.get('messages_ready',0)
+            if queue.get('messages_ready', 0) >= max_queue_message_ready:
+                max_queue_message_ready = queue.get('messages_ready',0)
+                max_queue_message_ready_queue = queue_name
+            queues['queues_' + vhost_name + '_' + queue_name + '.messages_unacknowledged'] = \
+                queue.get('messages_unacknowledged', 0)
+            if queue.get('messages_unacknowledged',0) >= max_queue_message_unack:
+                max_queue_message_unack = queue.get('messages_unacknowledged', 0)
+                max_queue_message_unack_queue = queue_name
+            queues['queues_' + vhost_name + '_' + queue_name + '.messages_ack'] = float(format(queue.get( 
+                'message_stats',{}).get('ack_details',{}).get('rate',0), '.2f'))
+            queues['queues_' + vhost_name + '_' + queue_name + '.messages_deliver_get'] = float(format(queue.get( 
+                'message_stats',{}).get('deliver_get_details',{}).get('rate',0), '.2f'))
+            queues['queues_' + vhost_name + '_' + queue_name + '.messages_publish'] = float(format(queue.get( 
+                'message_stats',{}).get('publish_details',{}).get('rate',0), '.2f'))
+            queues['queues_' + vhost_name + '_' + queue_name + '.messages_redeliver'] = float(format(queue.get( 
+                'message_stats',{}).get('redeliver_details',{}).get('rate',0), '.2f'))
+        queues['queues_max-queue-message-ready'] = max_queue_message_ready
+        queues['queues_max-queue-message-ready-queue'] = max_queue_message_ready_queue
+        queues['queues_max-queue-message-unack'] = max_queue_message_unack
+        queues['queues_max-queue-message-unack-queue'] = max_queue_message_unack_queue
+	print queues['cluster.queues']
+        return queues
+
+    def get_connections_details(self):
+        connections = defaultdict(int)
+        for connection in self.call_api('connections'):
+            connections['cluster.connections'] += 1
+            node_name = connection['node'].split('@')[1]
+            if node_name == self.hostname.split('.')[0]:
+                connections['nodes.connections'] += 1
+                key = 'nodes.connections_blocked'
+                if key not in connections:
+                    connections[key] = 0
+                if 'last_blocked_age' in connection and \
+                        connection['last_blocked_age'] != 'infinity' and \
+                        connection['last_blocked_age'] <= self.stat_interval:
+                    connections[key] += 1
+                else:
+                    connections[key] += 0
+        return connections
+
+    def get_bindings_details(self):
+        bindings = defaultdict(int)
+        for binding in self.call_api('bindings'):
+            bindings['cluster.bindings'] += 1
+        return bindings
+
+    def get_stats(self):
+        stats = {}
+        stats.update(self.get_message_details())
+        stats.update(self.get_nodes_details())
+     #   stats.update(self.get_channels_details())
+     #   stats.update(self.get_queues_details())
+     #   stats.update(self.get_connections_details())
+     #   stats.update(self.get_bindings_details())
+        return stats
+
+if __name__ == '__main__':
+    # set zabix server
+    zabbix = 'zabbix.sankuai.info'
+    sender = ZabbixSender(zabbix)
+    # monitor key
+    host = sys.argv[1]
+    port = sys.argv[2]
+
+    # gethostname if ip
+    ipr = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
+    if ipr.match(host):
+        result = socket.gethostbyaddr(host)
+        host   = result[0]
+        if re.search('.', host):
+            host = host.split('.')[0]
+
+    api = RabbitMQAPI(username='guest', password='guest',hostname=host, port=port)
+    stats = api.get_stats()
+
+    for key in stats:
+        sender.AddData(host,"rabbitmq_"+key, stats[key])
+    sender.Send()
+    #print stats
